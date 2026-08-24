@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>新港分隊排假系統</title>
+  <script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+  <style>
+    body { font-family: sans-serif; background: #f0f2f5; padding: 15px; text-align: center; color: #333; }
+    .card { background: white; border-radius: 15px; padding: 20px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); max-width: 500px; margin: auto; }
+    .calendar-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 5px; margin: 10px 0; }
+    .week-header { font-weight: bold; font-size: 14px; padding: 5px 0; color: #555; }
+    .week-header.weekend { color: #d32f2f; }
+    
+    .day { background: #fff; border: 1px solid #ddd; padding: 10px 2px; border-radius: 5px; font-size: 13px; cursor: pointer; transition: 0.2s; position: relative; }
+    .day.empty { background: transparent; border: none; cursor: default; }
+    .day.full { background: #eee; color: #999; cursor: not-allowed; }
+    .day.fixed-leave { background: #ffebee !important; color: #d32f2f; border: 1px solid #ffcdd2; cursor: not-allowed; }
+    .day.user-booked { border: 2px solid #06C755; background: #e8f5e9; font-weight: bold; }
+    .day.selected { background: #06C755 !important; color: white !important; }
+    .day.selected-repick { background: #FFD54F !important; color: #333 !important; border: 2px solid #FF8F00 !important; font-weight: bold; }
+    
+    .leave-text { font-size: 11px; margin-left: 2px; }
+    
+    .badge { position: absolute; top: -6px; right: -6px; background: #dc3545; color: white; border-radius: 10px; padding: 1px 5px; font-size: 10px; font-weight: bold; box-shadow: 0 2px 4px rgba(0,0,0,0.2); z-index: 2; }
+    .quota { font-size: 10px; color: #666; display: block; margin-top: 3px; }
+    
+    .btn { background: #06C755; color: white; border: none; padding: 12px; border-radius: 8px; width: 100%; font-size: 16px; cursor: pointer; margin-top: 10px; font-weight: bold; }
+    .btn:disabled { background: #ccc; cursor: not-allowed; }
+    .btn-danger { background: #dc3545; margin-top: 10px; }
+    .btn-queue { background: #17a2b8; font-size: 14px; margin-top: 0; width: 100%; }
+    .id-section { background: #f8f9fa; border: 1px dashed #ced4da; padding: 15px; margin-top: 25px; border-radius: 10px; font-size: 14px; }
+    .legend { display: flex; justify-content: space-around; font-size: 12px; margin-bottom: 10px; }
+    #queueContainer { display: none; margin-top: 15px; text-align: left; background: #ffffff; border: 1px solid #ddd; padding: 15px; border-radius: 10px; font-size: 14px; max-height: 250px; overflow-y: auto; }
+    .queue-item { padding: 8px 0; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; }
+    .status-done { color: #28a745; font-weight: bold; }
+    .status-now { color: #dc3545; font-weight: bold; }
+    .status-wait { color: #6c757d; }
+  </style>
+</head>
+<body>
+<div class="card" id="app"><h2>系統載入中... 🚒</h2></div>
+<script>
+  // 🔴 請在此替換為新港分隊的專屬資訊 🔴
+  const LIFF_ID = "2010519529-nw9soUQz"; 
+  const GAS_API_URL = "https://script.google.com/macros/s/AKfycbxaKN-lsWb1nQPtn7Rkz_TWVUDc1cMFvj22HGUiQSseQUc43gcFifEjXrgf_RkeqkrLxw/exec"; 
+
+  let state = { lineId: '', name: '', isMyTurn: false, selectedDate: '', targetYear: 0, targetMonth: 0, userBooked: [], fixedLeaves: {}, queueList: [], personnelList: [] };
+
+  async function init() {
+    try {
+      await liff.init({ liffId: LIFF_ID });
+      if (!liff.isLoggedIn()) { liff.login(); return; }
+      const profile = await liff.getProfile();
+      state.lineId = profile.userId;
+      
+      const now = new Date();
+      const nextMonthDate = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+      state.targetYear = nextMonthDate.getFullYear();
+      state.targetMonth = nextMonthDate.getMonth() + 1;
+      
+      fetchDataAndRender();
+    } catch (e) { document.getElementById('app').innerHTML = "初始化失敗"; }
+  }
+
+  async function fetchDataAndRender() {
+    document.getElementById('app').innerHTML = `<h2>資料同步中... ⏳</h2>`;
+    const timestamp = new Date().getTime();
+    
+    const initData = await fetch(`${GAS_API_URL}?action=getInitData&lineId=${state.lineId}&year=${state.targetYear}&month=${state.targetMonth}&t=${timestamp}`).then(res => res.json());
+    
+    state.isMyTurn = initData.isMyTurn;
+    state.name = initData.myName;
+    state.userBooked = initData.userBooked;
+    state.fixedLeaves = initData.fixedLeaves; 
+    state.queueList = initData.queueList; 
+    state.personnelList = initData.personnelList; // 接收名單
+    
+    let html = `<h3>民國 ${state.targetYear - 1911} 年 ${state.targetMonth} 月 輪休表</h3><p>哈囉，${state.name || '隊員'} 👋</p>`;
+    if (!initData.sheetFound) html += `<p style="color:red;">⚠️ 找不到分頁: ${initData.sheetName}</p>`;
+    html += `<div class="legend"><span>🔴 輪休</span><span>🟢 自選</span></div>`;
+    html += `<div class="calendar-grid"><div class="week-header weekend">日</div><div class="week-header">一</div><div class="week-header">二</div><div class="week-header">三</div><div class="week-header">四</div><div class="week-header">五</div><div class="week-header weekend">六</div>`;
+    
+    const daysInMonth = new Date(state.targetYear, state.targetMonth, 0).getDate();
+    const firstDayOfWeek = new Date(state.targetYear, state.targetMonth - 1, 1).getDay();
+    for (let i = 0; i < firstDayOfWeek; i++) html += `<div class="day empty"></div>`;
+
+    for (let i = 1; i <= daysInMonth; i++) {
+      let dateStr = `${state.targetYear}-${String(state.targetMonth).padStart(2, '0')}-${String(i).padStart(2, '0')}`;
+      let fixedText = state.fixedLeaves[dateStr] || ""; 
+      let myBookCount = state.userBooked.filter(d => d === dateStr).length;
+      let remain = initData.quotaMap[dateStr] || 0; 
+      let isFull = remain <= 0;
+      
+      let classList = `day ${isFull && myBookCount===0 ? 'full' : ''} ${fixedText !== "" ? 'fixed-leave' : ''} ${myBookCount > 0 ? 'user-booked' : ''}`;
+      let clickAttr = "";
+      if (fixedText === "" && (state.isMyTurn || myBookCount > 0)) {
+        clickAttr = `onclick="selectDate(this, '${dateStr}')"`;
+      }
+      
+      let displayText = fixedText;
+      if (displayText === "" && myBookCount > 0) displayText = "輪";
+      let textHtml = displayText ? `<span class="leave-text">${displayText}</span>` : "";
+      let badgeHtml = myBookCount > 1 ? `<div class="badge">x${myBookCount}</div>` : "";
+      
+      html += `<div class="${classList}" ${clickAttr}>${badgeHtml}<b>${i}</b>${textHtml}<span class="quota">${isFull && myBookCount===0?'滿':'餘'+remain}</span></div>`;
+    }
+    html += `</div>`;
+    
+    if (!state.isMyTurn) html += `<p style="color:#e65100; font-size:14px; font-weight:bold; margin-top:10px;">⌛ ${initData.message}</p>`;
+    html += `<div id="actionArea"><button class="btn" disabled>請選擇日期</button></div>`;
+    
+    html += `<div class="id-section"><button class="btn btn-queue" onclick="toggleQueue()">👀 展開 / 隱藏排假進度</button><div id="queueContainer"></div></div>`;
+    
+    // 🌟 手機版的雙人互換假單控制台
+    html += `
+      <div class="id-section" style="margin-top:15px; border-color:#FF8F00;">
+        <button class="btn btn-queue" style="background:#FF8F00; color:#fff;" onclick="toggleAdmin()">🛠️ 展開 / 隱藏雙人換假作業台</button>
+        <div id="adminContainer" style="display: none; margin-top: 15px; text-align: left; background: #ffffff; border: 1px solid #ddd; padding: 15px; border-radius: 10px; font-size: 14px;">
+          <label style="font-weight:bold; color:#555; display:block;">🧑 同仁 A</label>
+          <select id="swapNameA" style="width:100%; padding:10px; margin:5px 0 15px 0; border:1px solid #ccc; border-radius:4px; font-size:16px; background:#fff;"></select>
+          <label style="font-weight:bold; color:#555; display:block;">📅 A 原本的休假日 (要讓出的)</label>
+          <input type="date" id="swapDateA" style="width:100%; padding:10px; margin:5px 0 15px 0; border:1px solid #ccc; border-radius:4px; font-size:16px; background:#fff;">
+          
+          <hr style="border:0; border-top:1px dashed #ccc; margin:15px 0;">
+          
+          <label style="font-weight:bold; color:#555; display:block;">🧑 同仁 B</label>
+          <select id="swapNameB" style="width:100%; padding:10px; margin:5px 0 15px 0; border:1px solid #ccc; border-radius:4px; font-size:16px; background:#fff;"></select>
+          <label style="font-weight:bold; color:#555; display:block;">📅 B 原本的休假日 (要讓出的)</label>
+          <input type="date" id="swapDateB" style="width:100%; padding:10px; margin:5px 0 15px 0; border:1px solid #ccc; border-radius:4px; font-size:16px; background:#fff;">
+          
+          <button class="btn" style="background:#06C755;" onclick="submitSwap()">🔄 驗證並執行互換</button>
+        </div>
+      </div>
+    `;
+
+    document.getElementById('app').innerHTML = html;
+  }
+
+  function selectDate(el, date) {
+    document.querySelectorAll('.day').forEach(d => { d.classList.remove('selected'); d.classList.remove('selected-repick'); });
+    let isFixed = el.classList.contains('fixed-leave');
+    let isBooked = el.classList.contains('user-booked');
+    
+    if (isFixed) {
+      state.selectedDate = '';
+      const actionArea = document.getElementById('actionArea');
+      actionArea.innerHTML = `<button class="btn" disabled>此日為排定輪休，無法再填報</button>`;
+      return;
+    }
+
+    if (isBooked) el.classList.add('selected-repick');
+    else el.classList.add('selected');
+    state.selectedDate = date;
+    
+    const actionArea = document.getElementById('actionArea');
+    let btnHtml = "";
+    let isFull = el.querySelector('.quota').innerText === '滿';
+
+    if (state.isMyTurn && !isFull && !isBooked) {
+      btnHtml += `<button class="btn" style="background:#06C755; margin-top:10px;" onclick="submit()">➕ 確定填報此日假單</button>`;
+    }
+    if (isBooked) {
+      btnHtml += `<button class="btn btn-danger" onclick="cancelLeave()">🗑️ 退回此假單 (釋出名額)</button>`;
+    }
+
+    if (btnHtml === "") btnHtml = `<button class="btn" disabled>此日名額已滿，無法操作</button>`;
+    actionArea.innerHTML = btnHtml;
+  }
+
+  function submit() {
+    if (!state.selectedDate) return;
+    if (state.fixedLeaves[state.selectedDate]) {
+      alert("⚠️ 此日已為排定輪休，無法再填報！");
+      return;
+    }
+    if (!confirm(`確定要在 ${state.selectedDate} 填報假單嗎？`)) return;
+    document.getElementById('app').innerHTML = "<h2 style='margin-top:50px;'>傳送中...🚀</h2><p style='color:#666;'>正在記錄並通知下一位同仁，請稍候</p>";
+    fetch(`${GAS_API_URL}?action=submitLeave&lineId=${state.lineId}&name=${state.name}&date=${state.selectedDate}&type=輪休`)
+      .then(() => { 
+        document.getElementById('app').innerHTML = `
+          <h2 style='color:#06C755; margin-top:50px;'>✅ 填寫成功！</h2>
+          <p>您的排假已送出，系統已自動通知下一位同仁。</p>
+          <button class="btn" style="margin-top:20px;" onclick="liff.closeWindow()">關閉系統</button>
+        `;
+      });
+  }
+
+  function cancelLeave() {
+    if (!confirm(`⚠️ 確定要退回 ${state.selectedDate} 的假嗎？\n(將釋出名額，並為您配發一次換假補填機會)`)) return;
+    document.getElementById('app').innerHTML = "<h2 style='margin-top:50px;'>退回中...🚀</h2><p style='color:#666;'>正在處理您的請求</p>";
+    fetch(`${GAS_API_URL}?action=cancelLeave&lineId=${state.lineId}&name=${state.name}&date=${state.selectedDate}&year=${state.targetYear}&month=${state.targetMonth}`)
+      .then(() => { 
+        document.getElementById('app').innerHTML = `
+          <h2 style='color:#dc3545; margin-top:50px;'>✅ 退回成功！</h2>
+          <p>該日名額已釋出，您的換假補填機會已加入佇列。</p>
+          <button class="btn" style="margin-top:20px;" onclick="liff.closeWindow()">關閉系統</button>
+        `;
+      });
+  }
+
+  function toggleQueue() {
+    const qDiv = document.getElementById('queueContainer');
+    qDiv.style.display = (qDiv.style.display === 'block') ? 'none' : 'block';
+    if (qDiv.style.display === 'block') {
+      if(state.queueList.length === 0) { qDiv.innerHTML = "目前無排隊資料"; return; }
+      qDiv.innerHTML = state.queueList.map((item, i) => {
+        let statusClass = item.status === "已完成" ? "status-done" : (item.status === "填寫中" ? "status-now" : "status-wait");
+        let icon = item.status === "已完成" ? "✅" : (item.status === "填寫中" ? "👉" : "⏳");
+        return `<div class="queue-item ${statusClass}"><span>${i+1}. ${item.name}</span> <span>${icon} ${item.status}</span></div>`;
+      }).join('');
+    }
+  }
+  
+  // 🌟 手機端雙人換假面板控制
+  function toggleAdmin() {
+    const aDiv = document.getElementById('adminContainer');
+    aDiv.style.display = (aDiv.style.display === 'block') ? 'none' : 'block';
+    if (aDiv.style.display === 'block' && state.personnelList) {
+      let opts = '<option value="">請選擇人員...</option>' + state.personnelList.map(n => `<option value="${n}">${n}</option>`).join('');
+      document.getElementById('swapNameA').innerHTML = opts;
+      document.getElementById('swapNameB').innerHTML = opts;
+    }
+  }
+
+  // 🌟 執行手機端換假傳輸
+  function submitSwap() {
+    const nameA = document.getElementById('swapNameA').value;
+    const dateA = document.getElementById('swapDateA').value;
+    const nameB = document.getElementById('swapNameB').value;
+    const dateB = document.getElementById('swapDateB').value;
+    
+    if(!nameA || !dateA || !nameB || !dateB) { alert('⚠️ 請確實填寫雙方的姓名與日期！'); return; }
+    if(nameA === nameB) { alert('⚠️ 雙方姓名不能相同！'); return; }
+    if(!confirm(`確定要執行互換嗎？\n\n${nameA} (${dateA})\n🔄\n${nameB} (${dateB})`)) return;
+
+    document.getElementById('app').innerHTML = "<h2 style='margin-top:50px;'>驗證中...🚀</h2><p style='color:#666;'>正在檢查雙方假單狀態，請稍候</p>";
+    
+    fetch(`${GAS_API_URL}?action=swapLeave&nameA=${encodeURIComponent(nameA)}&dateA=${dateA}&nameB=${encodeURIComponent(nameB)}&dateB=${dateB}`)
+      .then(res => res.json())
+      .then(data => {
+        alert(data.resultMsg);
+        fetchDataAndRender(); // 換完假後自動重新載入最新日曆
+      })
+      .catch(err => {
+        alert("連線失敗，請稍後再試！");
+        fetchDataAndRender();
+      });
+  }
+
+  init();
+</script>
+</body>
+</html>
