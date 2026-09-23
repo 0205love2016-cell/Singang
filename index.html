@@ -6,13 +6,16 @@
   <title>新港分隊排假系統</title>
   <script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
   <style>
-    body { font-family: sans-serif; background: #f0f2f5; padding: 15px; text-align: center; color: #333; }
+    body { font-family: sans-serif; background: #f0f2f5; padding: 15px; text-align: center; color: #333; margin: 0; }
     .card { background: white; border-radius: 15px; padding: 20px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); max-width: 500px; margin: auto; }
+    .sync-status { font-size: 12px; color: #888; margin-top: -5px; margin-bottom: 10px; transition: 0.3s; }
+    .sync-status.updating { color: #e65100; font-weight: bold; }
+    .sync-status.ready { color: #2e7d32; }
     .calendar-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 5px; margin: 10px 0; }
     .week-header { font-weight: bold; font-size: 14px; padding: 5px 0; color: #555; }
     .week-header.weekend { color: #d32f2f; }
     
-    .day { background: #fff; border: 1px solid #ddd; padding: 10px 2px; border-radius: 5px; font-size: 13px; cursor: pointer; transition: 0.2s; position: relative; }
+    .day { background: #fff; border: 1px solid #ddd; padding: 10px 2px; border-radius: 5px; font-size: 13px; cursor: pointer; transition: 0.2s; position: relative; min-height: 42px; box-sizing: border-box; }
     .day.empty { background: transparent; border: none; cursor: default; }
     .day.full { background: #eee; color: #999; cursor: not-allowed; }
     .day.fixed-leave { background: #ffebee !important; color: #d32f2f; border: 1px solid #ffcdd2; cursor: not-allowed; }
@@ -21,7 +24,6 @@
     .day.selected-repick { background: #FFD54F !important; color: #333 !important; border: 2px solid #FF8F00 !important; font-weight: bold; }
     
     .leave-text { font-size: 11px; margin-left: 2px; }
-    
     .badge { position: absolute; top: -6px; right: -6px; background: #dc3545; color: white; border-radius: 10px; padding: 1px 5px; font-size: 10px; font-weight: bold; box-shadow: 0 2px 4px rgba(0,0,0,0.2); z-index: 2; }
     .quota { font-size: 10px; color: #666; display: block; margin-top: 3px; }
     
@@ -39,48 +41,48 @@
   </style>
 </head>
 <body>
-<div class="card" id="app"><h2>系統載入中... 🚒</h2></div>
+<div class="card" id="app"></div>
 <script>
-  // 🔴 請在此替換為新港分隊的專屬資訊 🔴
+  // 🔴 新港分隊專屬設定 🔴
   const LIFF_ID = "2010519529-nw9soUQz"; 
   const GAS_API_URL = "https://script.google.com/macros/s/AKfycbxaKN-lsWb1nQPtn7Rkz_TWVUDc1cMFvj22HGUiQSseQUc43gcFifEjXrgf_RkeqkrLxw/exec"; 
 
-  let state = { lineId: '', name: '', isMyTurn: false, selectedDate: '', targetYear: 0, targetMonth: 0, userBooked: [], fixedLeaves: {}, queueList: [], personnelList: [] };
+  // 初始化狀態
+  const now = new Date();
+  const nextMonthDate = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+  const targetYear = nextMonthDate.getFullYear();
+  const targetMonth = nextMonthDate.getMonth() + 1;
+  const cacheKey = `leave_cache_xingang_${targetYear}_${targetMonth}`;
 
-  async function init() {
-    try {
-      await liff.init({ liffId: LIFF_ID });
-      if (!liff.isLoggedIn()) { liff.login(); return; }
-      const profile = await liff.getProfile();
-      state.lineId = profile.userId;
-      
-      const now = new Date();
-      const nextMonthDate = new Date(now.getFullYear(), now.getMonth() + 1, 1);
-      state.targetYear = nextMonthDate.getFullYear();
-      state.targetMonth = nextMonthDate.getMonth() + 1;
-      
-      fetchDataAndRender();
-    } catch (e) { document.getElementById('app').innerHTML = "初始化失敗"; }
-  }
+  let state = {
+    lineId: localStorage.getItem('last_user_line_id_xingang') || '',
+    name: localStorage.getItem('last_user_name_xingang') || '',
+    isMyTurn: false,
+    selectedDate: '',
+    targetYear: targetYear,
+    targetMonth: targetMonth,
+    userBooked: [],
+    fixedLeaves: {},
+    queueList: [],
+    personnelList: [],
+    quotaMap: {},
+    sheetFound: true,
+    sheetName: `${targetYear - 1911}/${String(targetMonth).padStart(2, '0')}`,
+    statusMessage: '資料載入中...'
+  };
 
-  async function fetchDataAndRender() {
-    document.getElementById('app').innerHTML = `<h2>資料同步中... ⏳</h2>`;
-    const timestamp = new Date().getTime();
-    
-    const initData = await fetch(`${GAS_API_URL}?action=getInitData&lineId=${state.lineId}&year=${state.targetYear}&month=${state.targetMonth}&t=${timestamp}`).then(res => res.json());
-    
-    state.isMyTurn = initData.isMyTurn;
-    state.name = initData.myName;
-    state.userBooked = initData.userBooked;
-    state.fixedLeaves = initData.fixedLeaves; 
-    state.queueList = initData.queueList; 
-    state.personnelList = initData.personnelList; // 接收名單
-    
-    let html = `<h3>民國 ${state.targetYear - 1911} 年 ${state.targetMonth} 月 輪休表</h3><p>哈囉，${state.name || '隊員'} 👋</p>`;
-    if (!initData.sheetFound) html += `<p style="color:red;">⚠️ 找不到分頁: ${initData.sheetName}</p>`;
+  /**
+   * 0.05 秒本機骨架屏與快取優先渲染 (新港分隊專屬規則保留)
+   */
+  function renderAppSkeleton(syncText = "資料同步中... ⏳", isUpdating = true) {
+    const app = document.getElementById('app');
+    let html = `<h3>民國 ${state.targetYear - 1911} 年 ${state.targetMonth} 月 輪休表</h3>`;
+    html += `<p>哈囉，${state.name || '隊員'} 👋</p>`;
+    html += `<div class="sync-status ${isUpdating ? 'updating' : 'ready'}" id="syncStatusBar">${syncText}</div>`;
+    if (!state.sheetFound) html += `<p style="color:red;">⚠️ 找不到分頁: ${state.sheetName}</p>`;
     html += `<div class="legend"><span>🔴 輪休</span><span>🟢 自選</span></div>`;
     html += `<div class="calendar-grid"><div class="week-header weekend">日</div><div class="week-header">一</div><div class="week-header">二</div><div class="week-header">三</div><div class="week-header">四</div><div class="week-header">五</div><div class="week-header weekend">六</div>`;
-    
+
     const daysInMonth = new Date(state.targetYear, state.targetMonth, 0).getDate();
     const firstDayOfWeek = new Date(state.targetYear, state.targetMonth - 1, 1).getDay();
     for (let i = 0; i < firstDayOfWeek; i++) html += `<div class="day empty"></div>`;
@@ -89,10 +91,13 @@
       let dateStr = `${state.targetYear}-${String(state.targetMonth).padStart(2, '0')}-${String(i).padStart(2, '0')}`;
       let fixedText = state.fixedLeaves[dateStr] || ""; 
       let myBookCount = state.userBooked.filter(d => d === dateStr).length;
-      let remain = initData.quotaMap[dateStr] || 0; 
-      let isFull = remain <= 0;
+      let hasQuota = state.quotaMap[dateStr] !== undefined;
+      let remain = hasQuota ? state.quotaMap[dateStr] : '...'; 
+      let isFull = hasQuota && remain <= 0;
       
       let classList = `day ${isFull && myBookCount===0 ? 'full' : ''} ${fixedText !== "" ? 'fixed-leave' : ''} ${myBookCount > 0 ? 'user-booked' : ''}`;
+      
+      // 🛡️ 新港分隊規則：排定輪休 (fixedText !== "") 不可點擊
       let clickAttr = "";
       if (fixedText === "" && (state.isMyTurn || myBookCount > 0)) {
         clickAttr = `onclick="selectDate(this, '${dateStr}')"`;
@@ -102,17 +107,19 @@
       if (displayText === "" && myBookCount > 0) displayText = "輪";
       let textHtml = displayText ? `<span class="leave-text">${displayText}</span>` : "";
       let badgeHtml = myBookCount > 1 ? `<div class="badge">x${myBookCount}</div>` : "";
+      let quotaHtml = hasQuota ? (isFull && myBookCount === 0 ? '滿' : '餘' + remain) : '...';
       
-      html += `<div class="${classList}" ${clickAttr}>${badgeHtml}<b>${i}</b>${textHtml}<span class="quota">${isFull && myBookCount===0?'滿':'餘'+remain}</span></div>`;
+      html += `<div class="${classList}" ${clickAttr} id="day-${dateStr}">${badgeHtml}<b>${i}</b>${textHtml}<span class="quota">${quotaHtml}</span></div>`;
     }
     html += `</div>`;
     
-    if (!state.isMyTurn) html += `<p style="color:#e65100; font-size:14px; font-weight:bold; margin-top:10px;">⌛ ${initData.message}</p>`;
+    if (!state.isMyTurn && state.statusMessage) {
+      html += `<p style="color:#e65100; font-size:14px; font-weight:bold; margin-top:10px;" id="statusMsgBox">⌛ ${state.statusMessage}</p>`;
+    }
     html += `<div id="actionArea"><button class="btn" disabled>請選擇日期</button></div>`;
     
     html += `<div class="id-section"><button class="btn btn-queue" onclick="toggleQueue()">👀 展開 / 隱藏排假進度</button><div id="queueContainer"></div></div>`;
     
-    // 🌟 手機版的雙人互換假單控制台
     html += `
       <div class="id-section" style="margin-top:15px; border-color:#FF8F00;">
         <button class="btn btn-queue" style="background:#FF8F00; color:#fff;" onclick="toggleAdmin()">🛠️ 展開 / 隱藏雙人換假作業台</button>
@@ -134,7 +141,108 @@
       </div>
     `;
 
-    document.getElementById('app').innerHTML = html;
+    app.innerHTML = html;
+  }
+
+  /**
+   * 載入本機快取以達成秒開
+   */
+  function loadLocalCache() {
+    try {
+      const cachedStr = localStorage.getItem(cacheKey);
+      if (cachedStr) {
+        const cached = JSON.parse(cachedStr);
+        state.quotaMap = cached.quotaMap || {};
+        state.fixedLeaves = cached.fixedLeaves || {};
+        state.userBooked = cached.userBooked || [];
+        state.queueList = cached.queueList || [];
+        state.personnelList = cached.personnelList || [];
+        state.sheetFound = cached.sheetFound !== false;
+        state.isMyTurn = cached.isMyTurn || false;
+        if (cached.myName) state.name = cached.myName;
+        if (cached.message) state.statusMessage = cached.message;
+        renderAppSkeleton("正在同步最新資料... ⏳", true);
+        return true;
+      }
+    } catch (e) {}
+    return false;
+  }
+
+  // 1. 頁面啟動：0.05 秒內先繪製骨架或快取
+  const hasCache = loadLocalCache();
+  if (!hasCache) {
+    renderAppSkeleton("正連線至新港分隊系統... ⏳", true);
+  }
+
+  /**
+   * 平行非同步主邏輯：LIFF 驗證與後端 API 請求同時發出
+   */
+  async function launchFastSystem() {
+    const apiPromise = (async () => {
+      try {
+        const currentLineId = state.lineId;
+        const res = await fetch(`${GAS_API_URL}?action=getInitData&lineId=${encodeURIComponent(currentLineId)}&year=${state.targetYear}&month=${state.targetMonth}`);
+        const data = await res.json();
+        return data;
+      } catch (err) {
+        return { error: true, msg: err.message };
+      }
+    })();
+
+    const liffPromise = (async () => {
+      try {
+        await liff.init({ liffId: LIFF_ID });
+        if (!liff.isLoggedIn()) {
+          liff.login();
+          return null;
+        }
+        const profile = await liff.getProfile();
+        return profile.userId;
+      } catch (e) {
+        return null;
+      }
+    })();
+
+    const [initData, freshUserId] = await Promise.all([apiPromise, liffPromise]);
+
+    if (initData && !initData.error) {
+      applyInitData(initData);
+      if (freshUserId && freshUserId !== state.lineId) {
+        state.lineId = freshUserId;
+        localStorage.setItem('last_user_line_id_xingang', freshUserId);
+        fetch(`${GAS_API_URL}?action=getInitData&lineId=${encodeURIComponent(freshUserId)}&year=${state.targetYear}&month=${state.targetMonth}`)
+          .then(res => res.json())
+          .then(refreshedData => {
+            if (!refreshedData.error) applyInitData(refreshedData);
+          });
+      }
+    } else {
+      const syncStatus = document.getElementById('syncStatusBar');
+      if (syncStatus) {
+        syncStatus.className = "sync-status updating";
+        syncStatus.innerHTML = `<span style="color:#d32f2f;">⚠️ 連線較慢，請點此 <a href="javascript:location.reload()">重新整理</a></span>`;
+      }
+    }
+  }
+
+  function applyInitData(initData) {
+    state.isMyTurn = initData.isMyTurn;
+    state.name = initData.myName || state.name;
+    state.userBooked = initData.userBooked || [];
+    state.fixedLeaves = initData.fixedLeaves || {}; 
+    state.queueList = initData.queueList || []; 
+    state.personnelList = initData.personnelList || [];
+    state.quotaMap = initData.quotaMap || {};
+    state.sheetFound = initData.sheetFound;
+    state.sheetName = initData.sheetName;
+    state.statusMessage = initData.message;
+
+    if (state.name) localStorage.setItem('last_user_name_xingang', state.name);
+    try {
+      localStorage.setItem(cacheKey, JSON.stringify(initData));
+    } catch (e) {}
+
+    renderAppSkeleton("✅ 資料已同步最新", false);
   }
 
   function selectDate(el, date) {
@@ -142,6 +250,7 @@
     let isFixed = el.classList.contains('fixed-leave');
     let isBooked = el.classList.contains('user-booked');
     
+    // 🛡️ 新港分隊規則：排定輪休無法再填報
     if (isFixed) {
       state.selectedDate = '';
       const actionArea = document.getElementById('actionArea');
@@ -157,6 +266,7 @@
     let btnHtml = "";
     let isFull = el.querySelector('.quota').innerText === '滿';
 
+    // 🛡️ 新港分隊規則：未自選且名額未滿方可填報；已填報者方可退回
     if (state.isMyTurn && !isFull && !isBooked) {
       btnHtml += `<button class="btn" style="background:#06C755; margin-top:10px;" onclick="submit()">➕ 確定填報此日假單</button>`;
     }
@@ -170,17 +280,41 @@
 
   function submit() {
     if (!state.selectedDate) return;
+    // 🛡️ 新港分隊規則：防呆檢查
     if (state.fixedLeaves[state.selectedDate]) {
       alert("⚠️ 此日已為排定輪休，無法再填報！");
       return;
     }
     if (!confirm(`確定要在 ${state.selectedDate} 填報假單嗎？`)) return;
-    document.getElementById('app').innerHTML = "<h2 style='margin-top:50px;'>傳送中...🚀</h2><p style='color:#666;'>正在記錄並通知下一位同仁，請稍候</p>";
-    fetch(`${GAS_API_URL}?action=submitLeave&lineId=${state.lineId}&name=${state.name}&date=${state.selectedDate}&type=輪休`)
-      .then(() => { 
+
+    document.getElementById('app').innerHTML = `
+      <h2 style="margin-top:50px;">登記中... 🚀</h2>
+      <p style="color:#2e7d32; font-weight:bold;">已選定 ${state.selectedDate}</p>
+      <p style="color:#666; font-size:14px;">正在同步班表並自動通知下一位同仁，約需 1 至 2 秒...</p>
+      <div style="margin:20px auto; width:60%; background:#e0e0e0; border-radius:10px; height:6px; overflow:hidden;">
+        <div style="background:#06C755; width:80%; height:100%; border-radius:10px; animation: pulse 1s infinite alternate;"></div>
+      </div>
+    `;
+    try { localStorage.removeItem(cacheKey); } catch (e) {}
+
+    fetch(`${GAS_API_URL}?action=submitLeave&lineId=${encodeURIComponent(state.lineId)}&name=${encodeURIComponent(state.name)}&date=${state.selectedDate}&type=輪休`)
+      .then(res => res.json())
+      .then(resData => { 
+        if (resData && resData.success === false) {
+          alert(resData.message || "填報失敗");
+          launchFastSystem();
+          return;
+        }
         document.getElementById('app').innerHTML = `
           <h2 style='color:#06C755; margin-top:50px;'>✅ 填寫成功！</h2>
           <p>您的排假已送出，系統已自動通知下一位同仁。</p>
+          <button class="btn" style="margin-top:20px;" onclick="liff.closeWindow()">關閉系統</button>
+        `;
+      })
+      .catch(() => {
+        document.getElementById('app').innerHTML = `
+          <h2 style='color:#06C755; margin-top:50px;'>✅ 假單已送出！</h2>
+          <p>系統已登記排假，請直接關閉視窗。</p>
           <button class="btn" style="margin-top:20px;" onclick="liff.closeWindow()">關閉系統</button>
         `;
       });
@@ -188,12 +322,30 @@
 
   function cancelLeave() {
     if (!confirm(`⚠️ 確定要退回 ${state.selectedDate} 的假嗎？\n(將釋出名額，並為您配發一次換假補填機會)`)) return;
-    document.getElementById('app').innerHTML = "<h2 style='margin-top:50px;'>退回中...🚀</h2><p style='color:#666;'>正在處理您的請求</p>";
-    fetch(`${GAS_API_URL}?action=cancelLeave&lineId=${state.lineId}&name=${state.name}&date=${state.selectedDate}&year=${state.targetYear}&month=${state.targetMonth}`)
-      .then(() => { 
+    document.getElementById('app').innerHTML = `
+      <h2 style="margin-top:50px;">退回中... 🚀</h2>
+      <p style="color:#666; font-size:14px;">正在釋出名額並更新排假佇列...</p>
+    `;
+    try { localStorage.removeItem(cacheKey); } catch (e) {}
+
+    fetch(`${GAS_API_URL}?action=cancelLeave&lineId=${encodeURIComponent(state.lineId)}&name=${encodeURIComponent(state.name)}&date=${state.selectedDate}&year=${state.targetYear}&month=${state.targetMonth}`)
+      .then(res => res.json())
+      .then(resData => { 
+        if (resData && resData.success === false) {
+          alert(resData.message || "退回失敗");
+          launchFastSystem();
+          return;
+        }
         document.getElementById('app').innerHTML = `
           <h2 style='color:#dc3545; margin-top:50px;'>✅ 退回成功！</h2>
           <p>該日名額已釋出，您的換假補填機會已加入佇列。</p>
+          <button class="btn" style="margin-top:20px;" onclick="liff.closeWindow()">關閉系統</button>
+        `;
+      })
+      .catch(() => {
+        document.getElementById('app').innerHTML = `
+          <h2 style='color:#dc3545; margin-top:50px;'>✅ 退回已送出</h2>
+          <p>名額釋出請求已送出，請關閉視窗。</p>
           <button class="btn" style="margin-top:20px;" onclick="liff.closeWindow()">關閉系統</button>
         `;
       });
@@ -212,7 +364,6 @@
     }
   }
   
-  // 🌟 手機端雙人換假面板控制
   function toggleAdmin() {
     const aDiv = document.getElementById('adminContainer');
     aDiv.style.display = (aDiv.style.display === 'block') ? 'none' : 'block';
@@ -223,7 +374,6 @@
     }
   }
 
-  // 🌟 執行手機端換假傳輸
   function submitSwap() {
     const nameA = document.getElementById('swapNameA').value;
     const dateA = document.getElementById('swapDateA').value;
@@ -235,20 +385,21 @@
     if(!confirm(`確定要執行互換嗎？\n\n${nameA} (${dateA})\n🔄\n${nameB} (${dateB})`)) return;
 
     document.getElementById('app').innerHTML = "<h2 style='margin-top:50px;'>驗證中...🚀</h2><p style='color:#666;'>正在檢查雙方假單狀態，請稍候</p>";
-    
+    try { localStorage.removeItem(cacheKey); } catch (e) {}
+
     fetch(`${GAS_API_URL}?action=swapLeave&nameA=${encodeURIComponent(nameA)}&dateA=${dateA}&nameB=${encodeURIComponent(nameB)}&dateB=${dateB}`)
       .then(res => res.json())
       .then(data => {
         alert(data.resultMsg);
-        fetchDataAndRender(); // 換完假後自動重新載入最新日曆
+        launchFastSystem();
       })
       .catch(err => {
         alert("連線失敗，請稍後再試！");
-        fetchDataAndRender();
+        launchFastSystem();
       });
   }
 
-  init();
+  launchFastSystem();
 </script>
 </body>
 </html>
