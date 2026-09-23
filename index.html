@@ -312,11 +312,8 @@
         `;
       })
       .catch(() => {
-        document.getElementById('app').innerHTML = `
-          <h2 style='color:#06C755; margin-top:50px;'>✅ 假單已送出！</h2>
-          <p>系統已登記排假，請直接關閉視窗。</p>
-          <button class="btn" style="margin-top:20px;" onclick="liff.closeWindow()">關閉系統</button>
-        `;
+        alert("連線逾時或伺服器回應異常，請重新確認排假狀態！");
+        launchFastSystem();
       });
   }
 
@@ -343,11 +340,8 @@
         `;
       })
       .catch(() => {
-        document.getElementById('app').innerHTML = `
-          <h2 style='color:#dc3545; margin-top:50px;'>✅ 退回已送出</h2>
-          <p>名額釋出請求已送出，請關閉視窗。</p>
-          <button class="btn" style="margin-top:20px;" onclick="liff.closeWindow()">關閉系統</button>
-        `;
+        alert("連線逾時或伺服器回應異常，請重新確認排假狀態！");
+        launchFastSystem();
       });
   }
 
