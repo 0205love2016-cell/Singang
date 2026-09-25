@@ -30,12 +30,15 @@
     .btn { background: #06C755; color: white; border: none; padding: 12px; border-radius: 8px; width: 100%; font-size: 16px; cursor: pointer; margin-top: 10px; font-weight: bold; }
     .btn:disabled { background: #ccc; cursor: not-allowed; }
     .btn-danger { background: #dc3545; margin-top: 10px; }
+    .btn-abandon { background: #6c757d; color: white; border: none; padding: 10px; border-radius: 8px; width: 100%; font-size: 14px; cursor: pointer; margin-top: 8px; font-weight: bold; transition: background 0.2s; }
+    .btn-abandon:hover { background: #5a6268; }
     .btn-queue { background: #17a2b8; font-size: 14px; margin-top: 0; width: 100%; }
     .id-section { background: #f8f9fa; border: 1px dashed #ced4da; padding: 15px; margin-top: 25px; border-radius: 10px; font-size: 14px; }
     .legend { display: flex; justify-content: space-around; font-size: 12px; margin-bottom: 10px; }
     #queueContainer { display: none; margin-top: 15px; text-align: left; background: #ffffff; border: 1px solid #ddd; padding: 15px; border-radius: 10px; font-size: 14px; max-height: 250px; overflow-y: auto; }
     .queue-item { padding: 8px 0; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; }
     .status-done { color: #28a745; font-weight: bold; }
+    .status-abandoned { color: #888; text-decoration: line-through; }
     .status-now { color: #dc3545; font-weight: bold; }
     .status-wait { color: #6c757d; }
   </style>
@@ -58,6 +61,9 @@
     lineId: localStorage.getItem('last_user_line_id_xingang') || '',
     name: localStorage.getItem('last_user_name_xingang') || '',
     isMyTurn: false,
+    allFinished: false,
+    currentActiveNames: [],
+    currentActiveLineIds: [],
     selectedDate: '',
     targetYear: targetYear,
     targetMonth: targetMonth,
@@ -113,10 +119,19 @@
     }
     html += `</div>`;
     
-    if (!state.isMyTurn && state.statusMessage) {
-      html += `<p style="color:#e65100; font-size:14px; font-weight:bold; margin-top:10px;" id="statusMsgBox">⌛ ${state.statusMessage}</p>`;
+    if (state.statusMessage) {
+      const colorStyle = state.isMyTurn ? 'color:#2e7d32;' : 'color:#e65100;';
+      html += `<p style="${colorStyle} font-size:14px; font-weight:bold; margin-top:10px;" id="statusMsgBox">${state.statusMessage}</p>`;
     }
-    html += `<div id="actionArea"><button class="btn" disabled>請選擇日期</button></div>`;
+    
+    if (state.isMyTurn && !state.allFinished) {
+      html += `<div id="actionArea">
+        <button class="btn" disabled>請點選上方日期填報</button>
+        <button class="btn btn-abandon" onclick="abandonTurn()">🚫 自願放棄本輪填假</button>
+      </div>`;
+    } else {
+      html += `<div id="actionArea"><button class="btn" disabled>請選擇日期</button></div>`;
+    }
     
     html += `<div class="id-section"><button class="btn btn-queue" onclick="toggleQueue()">👀 展開 / 隱藏排假進度</button><div id="queueContainer"></div></div>`;
     
@@ -233,17 +248,30 @@
     state.name = matchedName;
     if (state.name) localStorage.setItem('last_user_name_xingang', state.name);
 
-    // 客戶端即時計算是否輪到我與狀態訊息 (遵守新港分隊佇列與規則)
+    state.allFinished = !!initData.allFinished;
+    state.currentActiveNames = initData.currentActiveNames || [];
+    state.currentActiveLineIds = initData.currentActiveLineIds || [];
+
+    // 客戶端即時計算是否輪到我與狀態訊息 (遵守新港分隊佇列與規則，支援同序號並行)
     const isInQueue = initData.queueList && initData.queueList.some(item => item.name === matchedName);
+    const isUserActive = (targetId && initData.currentActiveLineIds && initData.currentActiveLineIds.includes(targetId)) ||
+                         (matchedName && initData.currentActiveNames && initData.currentActiveNames.includes(matchedName));
+
     if (initData.allFinished) {
       state.isMyTurn = isInQueue;
       state.statusMessage = isInQueue ? '🎉 自由換假模式：可退回或自選假！' : '👀 瀏覽模式：大家已排假完成。';
-    } else if (initData.currentActiveLineId && initData.currentActiveLineId === targetId) {
+    } else if (isUserActive) {
       state.isMyTurn = true;
-      state.statusMessage = '👉 輪到您填假了！';
-    } else if (initData.currentActiveName) {
+      if (initData.currentActiveNames && initData.currentActiveNames.length > 1) {
+        const others = initData.currentActiveNames.filter(n => n !== matchedName);
+        state.statusMessage = `👉 輪到您填假了！(目前與 ${others.join('、')} 同序列填寫中)`;
+      } else {
+        state.statusMessage = '👉 輪到您填假了！';
+      }
+    } else if (initData.currentActiveNames && initData.currentActiveNames.length > 0) {
       state.isMyTurn = false;
-      state.statusMessage = isInQueue ? ('⏳ 目前輪到 [' + initData.currentActiveName + '] 填寫。') : ('👀 瀏覽模式 (目前輪到 [' + initData.currentActiveName + '])');
+      const namesStr = initData.currentActiveNames.join('、');
+      state.statusMessage = isInQueue ? ('⏳ 目前輪到 [' + namesStr + '] 填寫。') : ('👀 瀏覽模式 (目前輪到 [' + namesStr + '])');
     } else {
       state.isMyTurn = initData.isMyTurn;
       state.statusMessage = initData.message;
@@ -315,6 +343,9 @@
     }
 
     if (btnHtml === "") btnHtml = `<button class="btn" disabled>此日名額已滿，無法操作</button>`;
+    if (state.isMyTurn && !state.allFinished) {
+      btnHtml += `<button class="btn btn-abandon" onclick="abandonTurn()">🚫 自願放棄本輪填假</button>`;
+    }
     actionArea.innerHTML = btnHtml;
   }
 
@@ -416,15 +447,60 @@
       });
   }
 
+  function abandonTurn() {
+    if (!confirm("⚠️ 確定要自願放棄本輪填假嗎？\n\n說明：\n1. 放棄後，本輪次將不再為您登記假單。\n2. 系統將直接交由後續同仁填寫。\n3. 此動作確認後無法復原。")) {
+      return;
+    }
+
+    document.getElementById('app').innerHTML = `
+      <h2 style="margin-top:50px;">登記放棄中... 🚀</h2>
+      <p style="color:#e65100; font-weight:bold;">正在為您登記放棄本輪排假</p>
+      <p style="color:#666; font-size:14px;">系統正在更新佇列並自動通知後續同仁，約需 1 至 2 秒...</p>
+      <div style="margin:20px auto; width:60%; background:#e0e0e0; border-radius:10px; height:6px; overflow:hidden;">
+        <div style="background:#e65100; width:80%; height:100%; border-radius:10px; animation: pulse 1s infinite alternate;"></div>
+      </div>
+    `;
+
+    fetch(`${GAS_API_URL}?action=abandonTurn&lineId=${encodeURIComponent(state.lineId)}&name=${encodeURIComponent(state.name)}`)
+      .then(res => res.json())
+      .then(resData => {
+        if (resData && resData.success === false) {
+          alert(resData.message || "⚠️ 放棄登記失敗，請確認是否輪到您填假！");
+          launchFastSystem();
+          return;
+        }
+        try {
+          localStorage.removeItem(cacheKey);
+        } catch (e) {}
+
+        document.getElementById('app').innerHTML = `
+          <h2 style='color:#6c757d; margin-top:50px;'>✅ 已完成放棄登記</h2>
+          <p>您已放棄本輪填假，系統已通知後續同仁。</p>
+          <button class="btn" style="margin-top:20px;" onclick="liff.closeWindow()">關閉系統</button>
+        `;
+      })
+      .catch(() => {
+        alert("⚠️ 連線逾時或伺服器回應異常，請重新確認排假狀態！");
+        launchFastSystem();
+      });
+  }
+
   function toggleQueue() {
     const qDiv = document.getElementById('queueContainer');
     qDiv.style.display = (qDiv.style.display === 'block') ? 'none' : 'block';
     if (qDiv.style.display === 'block') {
-      if(state.queueList.length === 0) { qDiv.innerHTML = "目前無排隊資料"; return; }
+      if (state.queueList.length === 0) { qDiv.innerHTML = "目前無排隊資料"; return; }
       qDiv.innerHTML = state.queueList.map((item, i) => {
-        let statusClass = item.status === "已完成" ? "status-done" : (item.status === "填寫中" ? "status-now" : "status-wait");
-        let icon = item.status === "已完成" ? "✅" : (item.status === "填寫中" ? "👉" : "⏳");
-        return `<div class="queue-item ${statusClass}"><span>${i+1}. ${item.name}</span> <span>${icon} ${item.status}</span></div>`;
+        let isDone = item.status === "已完成";
+        let isAbandoned = item.status === "已放棄";
+        let isNow = !isDone && !isAbandoned && state.currentActiveNames && state.currentActiveNames.includes(item.name);
+        
+        let statusClass = isDone ? "status-done" : (isAbandoned ? "status-abandoned" : (isNow ? "status-now" : "status-wait"));
+        let icon = isDone ? "✅" : (isAbandoned ? "🚫" : (isNow ? "👉" : "⏳"));
+        let label = isDone ? "已完成" : (isAbandoned ? "已放棄" : (isNow ? "填寫中" : "等待中"));
+        let roundPrefix = item.round ? `【${item.round}】` : '';
+        let orderPrefix = item.order ? `序號 ${item.order} ` : '';
+        return `<div class="queue-item ${statusClass}"><span>${roundPrefix}${orderPrefix}${item.name}</span> <span>${icon} ${label}</span></div>`;
       }).join('');
     }
   }
