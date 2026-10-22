@@ -50,6 +50,10 @@
   const LIFF_ID = "2010519529-nw9soUQz"; 
   const GAS_API_URL = "https://script.google.com/macros/s/AKfycbxaKN-lsWb1nQPtn7Rkz_TWVUDc1cMFvj22HGUiQSseQUc43gcFifEjXrgf_RkeqkrLxw/exec"; 
 
+  // 測試預覽模式判斷 (網址帶有 ?test=1 或 ?debug=1 時啟用免連線預覽)
+  const urlParams = new URLSearchParams(window.location.search);
+  const isTestMode = urlParams.get('test') === '1' || urlParams.get('debug') === '1';
+
   // 初始化狀態
   const now = new Date();
   const nextMonthDate = new Date(now.getFullYear(), now.getMonth() + 1, 1);
@@ -85,7 +89,7 @@
     let html = `<h3>民國 ${state.targetYear - 1911} 年 ${state.targetMonth} 月 輪休表</h3>`;
     html += `<p>哈囉，${state.name || '隊員'} 👋</p>`;
     html += `<div class="sync-status ${isUpdating ? 'updating' : 'ready'}" id="syncStatusBar">${syncText}</div>`;
-    if (!state.sheetFound) html += `<p style="color:red;">⚠️ 找不到分頁: ${state.sheetName}</p>`;
+    if (!state.sheetFound) html += `<p style="color:red;">⚠️ 找不到分頁: ${state.sheetName} <a href="javascript:void(0)" onclick="forceReloadData()" style="color:#1565c0; text-decoration:underline; font-size:13px; margin-left:8px;">[點此強制重新讀取]</a></p>`;
     html += `<div class="legend"><span>🔴 輪休</span><span>🟢 自選</span></div>`;
     html += `<div class="calendar-grid"><div class="week-header weekend">日</div><div class="week-header">一</div><div class="week-header">二</div><div class="week-header">三</div><div class="week-header">四</div><div class="week-header">五</div><div class="week-header weekend">六</div>`;
 
@@ -190,6 +194,92 @@
   /**
    * 平行非同步主邏輯：LIFF 驗證與後端 API 請求同時發出
    */
+    /**
+   * 🛡️ 純前端主動降級容錯：直接向 Google 試算表 (Visualization API) 讀取月份資料
+   * 當 GAS 後端 ScriptCache 鎖死或未即時更新時，由前端穿透直接讀取真實試算表
+   */
+  async function fetchDirectSheetFallback(year, month) {
+    try {
+      const rocYear = parseInt(year) - 1911;
+      const monthStr = String(month).padStart(2, '0');
+      const sheetName = `${rocYear}/${monthStr}`;
+      const SPREADSHEET_ID = "1O9z4b3oFmkf936O-sSsASrIBQVZcMAOmiWZAh5UdlaI";
+      const gvizUrl = `https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}/gviz/tq?tqx=out:json&sheet=${encodeURIComponent(sheetName)}`;
+      const res = await fetch(gvizUrl);
+      const text = await res.text();
+      const jsonMatch = text.match(/google\.visualization\.Query\.setResponse\(([\s\S]+)\);/);
+      if (!jsonMatch) return null;
+      const data = JSON.parse(jsonMatch[1]);
+      if (!data || !data.table || !data.table.rows) return null;
+
+      const rows = data.table.rows;
+      let quotaMap = {};
+      let memberFixedLeaves = {};
+      let quotaRowIndex = -1;
+
+      for (let i = 0; i < rows.length; i++) {
+        const c = rows[i].c;
+        const label = c && c[0] && c[0].v ? String(c[0].v).trim() : "";
+        if (label.includes("可填") || label.includes("名額")) {
+          quotaRowIndex = i;
+          break;
+        }
+      }
+      if (quotaRowIndex === -1) {
+        for (let i = 0; i < rows.length; i++) {
+          const c = rows[i].c;
+          const label = c && c[0] && c[0].v ? String(c[0].v).trim() : "";
+          if (label.includes("人數")) {
+            quotaRowIndex = i;
+            break;
+          }
+        }
+      }
+
+      if (quotaRowIndex !== -1) {
+        const qRow = rows[quotaRowIndex].c;
+        for (let d = 1; d <= 31; d++) {
+          if (d < qRow.length && qRow[d] && qRow[d].v !== null && qRow[d].v !== undefined) {
+            const val = parseInt(qRow[d].v, 10);
+            const dateStr = `${year}-${monthStr}-${String(d).padStart(2, '0')}`;
+            quotaMap[dateStr] = isNaN(val) ? 0 : val;
+          }
+        }
+      }
+
+      for (let r = 0; r < rows.length; r++) {
+        const c = rows[r].c;
+        const rowName = c && c[0] && c[0].v ? String(c[0].v).trim() : "";
+        if (rowName && !rowName.includes("人數") && !rowName.includes("名額")) {
+          let leaves = {};
+          let hasLeave = false;
+          for (let d = 1; d <= 31; d++) {
+            if (d < c.length && c[d] && c[d].v) {
+              const v = String(c[d].v).trim();
+              if (v !== "") {
+                const dateStr = `${year}-${monthStr}-${String(d).padStart(2, '0')}`;
+                leaves[dateStr] = v;
+                hasLeave = true;
+              }
+            }
+          }
+          if (hasLeave) {
+            memberFixedLeaves[rowName] = leaves;
+          }
+        }
+      }
+
+      return {
+        sheetFound: true,
+        sheetName: sheetName,
+        quotaMap: quotaMap,
+        memberFixedLeaves: memberFixedLeaves
+      };
+    } catch (err) {
+      return null;
+    }
+  }
+
   async function launchFastSystem() {
     const apiPromise = (async () => {
       try {
@@ -219,17 +309,38 @@
 
     const [initData, freshUserId] = await Promise.all([apiPromise, liffPromise]);
 
-    if (initData && !initData.error) {
+    let finalInitData = initData;
+    if (finalInitData && !finalInitData.error) {
+      // 🛡️ 純前端主動降級容錯：若 GAS 快取鎖死或找不到分頁，前端直接穿透 Google 試算表補足
+      if (!finalInitData.sheetFound || !finalInitData.quotaMap || Object.keys(finalInitData.quotaMap).length === 0) {
+        const fallback = await fetchDirectSheetFallback(state.targetYear, state.targetMonth);
+        if (fallback) {
+          finalInitData.sheetFound = true;
+          finalInitData.sheetName = fallback.sheetName;
+          finalInitData.quotaMap = fallback.quotaMap;
+          finalInitData.memberFixedLeaves = fallback.memberFixedLeaves;
+        }
+      }
+
       if (freshUserId) {
         state.lineId = freshUserId;
         localStorage.setItem('last_user_line_id_xingang', freshUserId);
       }
-      applyInitData(initData, freshUserId || state.lineId);
+      applyInitData(finalInitData, freshUserId || state.lineId);
     } else {
-      const syncStatus = document.getElementById('syncStatusBar');
-      if (syncStatus) {
-        syncStatus.className = "sync-status updating";
-        syncStatus.innerHTML = `<span style="color:#d32f2f;">⚠️ 連線較慢，請點此 <a href="javascript:location.reload()">🔄 重新整理</a></span>`;
+      // 若後端 API 逾時，嘗試前端直連試算表
+      const fallback = await fetchDirectSheetFallback(state.targetYear, state.targetMonth);
+      if (fallback) {
+        fallback.queueList = [];
+        fallback.personnelList = [];
+        fallback.recordsList = [];
+        applyInitData(fallback, freshUserId || state.lineId);
+      } else {
+        const syncStatus = document.getElementById('syncStatusBar');
+        if (syncStatus) {
+          syncStatus.className = "sync-status updating";
+          syncStatus.innerHTML = `<span style="color:#d32f2f;">⚠️ 連線較慢，請點此 <a href="javascript:location.reload()">🔄 重新整理</a></span>`;
+        }
       }
     }
   }
@@ -306,14 +417,43 @@
     state.sheetFound = initData.sheetFound;
     state.sheetName = initData.sheetName;
 
-    try {
-      localStorage.setItem(cacheKey, JSON.stringify(initData));
-    } catch (e) {}
+    if (initData.sheetFound) {
+      try {
+        localStorage.setItem(cacheKey, JSON.stringify(initData));
+      } catch (e) {}
+    } else {
+      try {
+        localStorage.removeItem(cacheKey); // 若找不到分頁，立即清除本機快取，防範被鎖死
+      } catch (e) {}
+    }
 
     renderAppSkeleton("✅ 資料已同步最新", false);
   }
 
-  function selectDate(el, date) {
+    /**
+   * 強制穿透快取重新向後端載入資料
+   */
+  async function forceReloadData() {
+    try {
+      localStorage.removeItem(cacheKey);
+      const syncStatus = document.getElementById('syncStatusBar');
+      if (syncStatus) {
+        syncStatus.className = "sync-status updating";
+        syncStatus.innerHTML = "⚡ 強制穿透快取重新抓取中... ⏳";
+      }
+      const res = await fetch(`${GAS_API_URL}?action=getInitData&lineId=${encodeURIComponent(state.lineId)}&year=${state.targetYear}&month=${state.targetMonth}&refresh=1`);
+      const data = await res.json();
+      if (data && !data.error) {
+        applyInitData(data, state.lineId);
+      } else {
+        alert("重新讀取失敗，請確認後端狀態：" + (data ? data.msg || data.message : "未知錯誤"));
+      }
+    } catch (e) {
+      alert("連線失敗，請重試：" + e.message);
+    }
+  }
+
+function selectDate(el, date) {
     document.querySelectorAll('.day').forEach(d => { d.classList.remove('selected'); d.classList.remove('selected-repick'); });
     let isFixed = el.classList.contains('fixed-leave');
     let isBooked = el.classList.contains('user-booked');
@@ -367,6 +507,15 @@
       </div>
     `;
     const targetBookDate = state.selectedDate;
+
+    if (isTestMode) {
+      document.getElementById('app').innerHTML = `
+        <h2 style='color:#06C755; margin-top:50px;'>✅ 填寫成功！(測試預覽)</h2>
+        <p>您已選定 ${state.selectedDate} 輪休假單，系統已自動通知後續同仁。</p>
+        <button class="btn" style="margin-top:20px;" onclick="location.reload()">重新整理預覽</button>
+      `;
+      return;
+    }
 
     fetch(`${GAS_API_URL}?action=submitLeave&lineId=${encodeURIComponent(state.lineId)}&name=${encodeURIComponent(state.name)}&date=${targetBookDate}&type=輪休`)
       .then(res => res.json())
@@ -461,6 +610,15 @@
       </div>
     `;
 
+    if (isTestMode) {
+      document.getElementById('app').innerHTML = `
+        <h2 style='color:#6c757d; margin-top:50px;'>✅ 已完成放棄登記 (測試預覽)</h2>
+        <p>您已放棄本輪填假，系統已將填假機會交由後續同仁。</p>
+        <button class="btn" style="margin-top:20px;" onclick="location.reload()">重新整理預覽</button>
+      `;
+      return;
+    }
+
     fetch(`${GAS_API_URL}?action=abandonTurn&lineId=${encodeURIComponent(state.lineId)}&name=${encodeURIComponent(state.name)}`)
       .then(res => res.json())
       .then(resData => {
@@ -540,7 +698,33 @@
       });
   }
 
-  launchFastSystem();
+  if (isTestMode) {
+    const mockDays = {};
+    for (let d = 1; d <= 31; d++) {
+      const dStr = `${state.targetYear}-${String(state.targetMonth).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+      mockDays[dStr] = 2;
+    }
+    applyInitData({
+      myName: '測試同仁',
+      isMyTurn: true,
+      allFinished: false,
+      currentActiveNames: ['測試同仁', '隊友B'],
+      currentActiveLineIds: ['mock_u1', 'mock_u2'],
+      message: '輪到您填假了！',
+      quotaMap: mockDays,
+      queueList: [
+        { round: '第一輪', order: 1, name: '測試同仁', status: '等待中' },
+        { round: '第一輪', order: 1, name: '隊友B', status: '等待中' },
+        { round: '第一輪', order: 2, name: '學長C', status: '等待中' },
+        { round: '第一輪', order: 2, name: '學長D', status: '等待中' }
+      ],
+      personnelList: ['測試同仁', '隊友B', '學長C', '學長D'],
+      sheetFound: true,
+      sheetName: `${state.targetYear - 1911}/${String(state.targetMonth).padStart(2, '0')}`
+    }, 'mock_u1');
+  } else {
+    launchFastSystem();
+  }
 </script>
 </body>
 </html>
