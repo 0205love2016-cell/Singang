@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>新港分隊排假系統</title>
-  <script src="https://static.line-scdn.net/liff/edge/2/sdk.js" defer></script>
+  <script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
   <style>
     body { font-family: sans-serif; background: #f0f2f5; padding: 15px; text-align: center; color: #333; margin: 0; }
     .card { background: white; border-radius: 15px; padding: 20px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); max-width: 500px; margin: auto; }
@@ -61,6 +61,8 @@
   const targetMonth = nextMonthDate.getMonth() + 1;
   const cacheKey = `leave_cache_xingang_${targetYear}_${targetMonth}`;
 
+  let latestInitData = null;
+
   let state = {
     lineId: localStorage.getItem('last_user_line_id_xingang') || '',
     name: localStorage.getItem('last_user_name_xingang') || '',
@@ -86,8 +88,18 @@
    */
   function renderAppSkeleton(syncText = "資料同步中... ⏳", isUpdating = true) {
     const app = document.getElementById('app');
-    let html = `<h3>民國 ${state.targetYear - 1911} 年 ${state.targetMonth} 月 輪休表</h3>`;
+    let html = `<h3><span onclick="toggleIdentitySelector()" style="user-select:none;">民國</span> ${state.targetYear - 1911} 年 ${state.targetMonth} 月 輪休表</h3>`;
     html += `<p>哈囉，${state.name || '隊員'} 👋</p>`;
+    html += `
+      <div id="identitySelector" style="display:none; background:#f0f7ff; border:1px solid #cce5ff; border-radius:8px; padding:12px; margin:10px auto; max-width:460px; text-align:left;">
+        <div style="font-size:13px; color:#004085; font-weight:bold; margin-bottom:4px;">🧑 手動選取身分</div>
+        <div style="display:flex; gap:8px;">
+          <select id="manualSelectName" style="flex:1; padding:8px; font-size:14px; border:1px solid #b8daff; border-radius:5px; background:white;"></select>
+          <button onclick="confirmManualIdentity()" style="padding:8px 14px; background:#007bff; color:white; border:none; border-radius:5px; font-weight:bold; cursor:pointer;">確認切換</button>
+        </div>
+        <div style="font-size:11px; color:#6c757d; margin-top:4px;">💡 提示：若手機未能自動辨識身分，可在此手動切換您的姓名。</div>
+      </div>
+    `;
     html += `<div class="sync-status ${isUpdating ? 'updating' : 'ready'}" id="syncStatusBar">${syncText}</div>`;
     if (!state.sheetFound) html += `<p style="color:red;">⚠️ 找不到分頁: ${state.sheetName} <a href="javascript:void(0)" onclick="forceReloadData()" style="color:#1565c0; text-decoration:underline; font-size:13px; margin-left:8px;">[點此強制重新讀取]</a></p>`;
     html += `<div class="legend"><span>🔴 輪休</span><span>🟢 自選</span></div>`;
@@ -292,9 +304,21 @@
       }
     })();
 
+  /**
+   * 等待 LIFF SDK 載入完成 (防止非同步競態)
+   */
+  async function waitForLiffSdk(maxMs = 3000) {
+    const start = Date.now();
+    while (typeof liff === 'undefined' && (Date.now() - start < maxMs)) {
+      await new Promise(r => setTimeout(r, 100));
+    }
+    return typeof liff !== 'undefined';
+  }
+
     const liffPromise = (async () => {
       try {
-        if (typeof liff === 'undefined') return null;
+        const liffAvailable = await waitForLiffSdk(3000);
+        if (!liffAvailable) return null;
         await liff.init({ liffId: LIFF_ID });
         if (!liff.isLoggedIn()) {
           liff.login();
@@ -349,6 +373,7 @@
    * 套用後端最新資料並平滑更新介面 (支援客戶端身分即時動態映射)
    */
   function applyInitData(initData, activeLineId) {
+    latestInitData = initData;
     const targetId = activeLineId || state.lineId;
     let matchedName = initData.myName || state.name;
 
@@ -508,7 +533,74 @@ function selectDate(el, date) {
     `;
     const targetBookDate = state.selectedDate;
 
-    if (isTestMode) {
+    
+  function toggleIdentitySelector() {
+    const selDiv = document.getElementById('identitySelector');
+    if (!selDiv) return;
+    const isShowing = selDiv.style.display === 'block';
+    selDiv.style.display = isShowing ? 'none' : 'block';
+    if (!isShowing) {
+      populateManualSelect();
+    }
+  }
+
+  function populateManualSelect() {
+    const selectEl = document.getElementById('manualSelectName');
+    if (!selectEl) return;
+    let names = state.personnelList || [];
+    if (names.length === 0 && latestInitData && latestInitData.personnelList) {
+      names = latestInitData.personnelList;
+    }
+    let validNames = names.filter(n => n && !n.includes('人數') && !n.includes('名額'));
+    let opts = '<option value="">請選擇您的姓名...</option>';
+    validNames.forEach(n => {
+      opts += `<option value="${n}" ${n === state.name ? 'selected' : ''}>${n}</option>`;
+    });
+    selectEl.innerHTML = opts;
+  }
+
+  function confirmManualIdentity() {
+    const selectEl = document.getElementById('manualSelectName');
+    if (!selectEl) return;
+    const selectedName = selectEl.value;
+    if (!selectedName) {
+      alert("⚠️ 請先選擇您的姓名！");
+      return;
+    }
+
+    // 反查對應的 lineId
+    let foundLineId = '';
+    if (latestInitData) {
+      if (latestInitData.lineIdToName) {
+        for (let id in latestInitData.lineIdToName) {
+          if (latestInitData.lineIdToName[id] === selectedName) {
+            foundLineId = id;
+            break;
+          }
+        }
+      }
+      if (!foundLineId && latestInitData.queueList) {
+        const qItem = latestInitData.queueList.find(item => item.name === selectedName);
+        if (qItem && qItem.lineId) {
+          foundLineId = qItem.lineId;
+        }
+      }
+    }
+
+    state.name = selectedName;
+    if (foundLineId) {
+      state.lineId = foundLineId;
+      localStorage.setItem('last_user_line_id_xingang', foundLineId);
+    }
+    localStorage.setItem('last_user_name_xingang', selectedName);
+
+    if (latestInitData) {
+      applyInitData(latestInitData, foundLineId || state.lineId);
+    }
+    alert(`✅ 已將身分切換為【${selectedName}】！`);
+  }
+
+  if (isTestMode) {
       document.getElementById('app').innerHTML = `
         <h2 style='color:#06C755; margin-top:50px;'>✅ 填寫成功！(測試預覽)</h2>
         <p>您已選定 ${state.selectedDate} 輪休假單，系統已自動通知後續同仁。</p>
