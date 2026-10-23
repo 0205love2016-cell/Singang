@@ -3,6 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
   <title>新港分隊排假系統</title>
   <script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
   <style>
@@ -88,7 +91,7 @@
    */
   function renderAppSkeleton(syncText = "資料同步中... ⏳", isUpdating = true) {
     const app = document.getElementById('app');
-    let html = `<h3><span onclick="toggleIdentitySelector()" style="user-select:none;">民國</span> ${state.targetYear - 1911} 年 ${state.targetMonth} 月 輪休表</h3>`;
+    let html = `<h3><span onclick="toggleIdentitySelector()" style="cursor:pointer; user-select:none; padding:4px 8px; border-radius:4px; display:inline-block;">民國</span> ${state.targetYear - 1911} 年 ${state.targetMonth} 月 輪休表</h3>`;
     html += `<p>哈囉，${state.name || '隊員'} 👋</p>`;
     html += `
       <div id="identitySelector" style="display:none; background:#f0f7ff; border:1px solid #cce5ff; border-radius:8px; padding:12px; margin:10px auto; max-width:460px; text-align:left;">
@@ -414,7 +417,7 @@
     }
 
     if (!matchedName && targetId) {
-      state.statusMessage = '⚠️ 找不到您的系統 ID，請通知管理員。';
+      state.statusMessage = '⚠️ 找不到您的系統 ID，請通知管理員。<a href="javascript:void(0)" onclick="toggleIdentitySelector()" style="color:#007bff; text-decoration:underline; font-size:13px; margin-left:6px;">[手動選身分]</a>';
     }
 
     // 客戶端計算個人已選假單 userBooked
@@ -533,74 +536,7 @@ function selectDate(el, date) {
     `;
     const targetBookDate = state.selectedDate;
 
-    
-  function toggleIdentitySelector() {
-    const selDiv = document.getElementById('identitySelector');
-    if (!selDiv) return;
-    const isShowing = selDiv.style.display === 'block';
-    selDiv.style.display = isShowing ? 'none' : 'block';
-    if (!isShowing) {
-      populateManualSelect();
-    }
-  }
-
-  function populateManualSelect() {
-    const selectEl = document.getElementById('manualSelectName');
-    if (!selectEl) return;
-    let names = state.personnelList || [];
-    if (names.length === 0 && latestInitData && latestInitData.personnelList) {
-      names = latestInitData.personnelList;
-    }
-    let validNames = names.filter(n => n && !n.includes('人數') && !n.includes('名額'));
-    let opts = '<option value="">請選擇您的姓名...</option>';
-    validNames.forEach(n => {
-      opts += `<option value="${n}" ${n === state.name ? 'selected' : ''}>${n}</option>`;
-    });
-    selectEl.innerHTML = opts;
-  }
-
-  function confirmManualIdentity() {
-    const selectEl = document.getElementById('manualSelectName');
-    if (!selectEl) return;
-    const selectedName = selectEl.value;
-    if (!selectedName) {
-      alert("⚠️ 請先選擇您的姓名！");
-      return;
-    }
-
-    // 反查對應的 lineId
-    let foundLineId = '';
-    if (latestInitData) {
-      if (latestInitData.lineIdToName) {
-        for (let id in latestInitData.lineIdToName) {
-          if (latestInitData.lineIdToName[id] === selectedName) {
-            foundLineId = id;
-            break;
-          }
-        }
-      }
-      if (!foundLineId && latestInitData.queueList) {
-        const qItem = latestInitData.queueList.find(item => item.name === selectedName);
-        if (qItem && qItem.lineId) {
-          foundLineId = qItem.lineId;
-        }
-      }
-    }
-
-    state.name = selectedName;
-    if (foundLineId) {
-      state.lineId = foundLineId;
-      localStorage.setItem('last_user_line_id_xingang', foundLineId);
-    }
-    localStorage.setItem('last_user_name_xingang', selectedName);
-
-    if (latestInitData) {
-      applyInitData(latestInitData, foundLineId || state.lineId);
-    }
-    alert(`✅ 已將身分切換為【${selectedName}】！`);
-  }
-
-  if (isTestMode) {
+    if (isTestMode) {
       document.getElementById('app').innerHTML = `
         <h2 style='color:#06C755; margin-top:50px;'>✅ 填寫成功！(測試預覽)</h2>
         <p>您已選定 ${state.selectedDate} 輪休假單，系統已自動通知後續同仁。</p>
@@ -788,6 +724,73 @@ function selectDate(el, date) {
         alert("⚠️ 連線失敗，請稍後再試！");
         launchFastSystem();
       });
+  }
+
+  
+  function toggleIdentitySelector() {
+    const selDiv = document.getElementById('identitySelector');
+    if (!selDiv) return;
+    const isShowing = selDiv.style.display === 'block';
+    selDiv.style.display = isShowing ? 'none' : 'block';
+    if (!isShowing) {
+      populateManualSelect();
+    }
+  }
+
+  function populateManualSelect() {
+    const selectEl = document.getElementById('manualSelectName');
+    if (!selectEl) return;
+    let names = state.personnelList || [];
+    if (names.length === 0 && latestInitData && latestInitData.personnelList) {
+      names = latestInitData.personnelList;
+    }
+    let validNames = names.filter(n => n && !String(n).includes('人數') && !String(n).includes('名額'));
+    let opts = '<option value="">請選擇您的姓名...</option>';
+    validNames.forEach(n => {
+      opts += `<option value="${n}" ${n === state.name ? 'selected' : ''}>${n}</option>`;
+    });
+    selectEl.innerHTML = opts;
+  }
+
+  function confirmManualIdentity() {
+    const selectEl = document.getElementById('manualSelectName');
+    if (!selectEl) return;
+    const selectedName = selectEl.value;
+    if (!selectedName) {
+      alert("⚠️ 請先選擇您的姓名！");
+      return;
+    }
+
+    // 反查對應的 lineId
+    let foundLineId = '';
+    if (latestInitData) {
+      if (latestInitData.lineIdToName) {
+        for (let id in latestInitData.lineIdToName) {
+          if (latestInitData.lineIdToName[id] === selectedName) {
+            foundLineId = id;
+            break;
+          }
+        }
+      }
+      if (!foundLineId && latestInitData.queueList) {
+        const qItem = latestInitData.queueList.find(item => item.name === selectedName);
+        if (qItem && qItem.lineId) {
+          foundLineId = qItem.lineId;
+        }
+      }
+    }
+
+    state.name = selectedName;
+    if (foundLineId) {
+      state.lineId = foundLineId;
+      localStorage.setItem('last_user_line_id_xingang', foundLineId);
+    }
+    localStorage.setItem('last_user_name_xingang', selectedName);
+
+    if (latestInitData) {
+      applyInitData(latestInitData, foundLineId || state.lineId);
+    }
+    alert(`✅ 已將身分切換為【${selectedName}】！`);
   }
 
   if (isTestMode) {
